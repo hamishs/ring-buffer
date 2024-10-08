@@ -52,6 +52,23 @@ impl<T> RingBuffer<T> {
         unsafe { Some(&*self.ptr.as_ptr().add(idx)) }
     }
 
+    /// Insert an item at the front of the buffer.
+    pub fn push_front(&mut self, item: T) {
+        if self.is_full() {
+            self.grow();
+        }
+
+        let index = self.head.wrapping_sub(1) % self.capacity;
+
+        unsafe {
+            self.ptr.as_ptr().add(index).write(item);
+        }
+
+        self.head = index;
+        self.len += 1;
+    }
+
+    /// Insert an item at the end of the buffer.
     pub fn push_back(&mut self, item: T) {
         if self.is_full() {
             self.grow();
@@ -215,5 +232,31 @@ mod tests {
         assert_eq!(rb[0], 1);
         assert_eq!(rb[1], 2);
         assert_eq!(rb[2], 3);
+    }
+
+    #[test]
+    fn test_push_front() {
+        let mut rb = RingBuffer::<i32>::new();
+
+        rb.push_front(1);
+        assert_eq!(rb.len, 1);
+        assert_eq!(rb.head, 0);
+        assert_eq!(rb[0], 1);
+        assert!(rb.get(1).is_none());
+
+        rb.push_front(2);
+        assert_eq!(rb.len, 2);
+        assert_eq!(rb.head, 1);
+        assert_eq!(rb[0], 2);
+        assert_eq!(rb[1], 1);
+
+        //     H         H               H  (see `grow` for why this happens)
+        // [1, 2] -> [1, 2, ., .] -> [., 2, 1, .] -> [3, 2, 1, .]
+        rb.push_front(3);
+        assert_eq!(rb.len, 3);
+        assert_eq!(rb.head, 0);
+        assert_eq!(rb[0], 3);
+        assert_eq!(rb[1], 2);
+        assert_eq!(rb[2], 1);
     }
 }
