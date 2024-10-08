@@ -1,15 +1,13 @@
 //! A growable ring buffer implementation.
 //!
-//! https://en.wikipedia.org/wiki/Circular_buffer#:~:text=In%20computer%20science%2C%20a%20circular,easily%20to%20buffering%20data%20streams.
-//! https://stackoverflow.com/questions/49072494/how-does-the-vecdeque-ring-buffer-work-internally
-//! https://doc.rust-lang.org/nomicon/vec/vec-push-pop.html
-//!
-//!
+//! <https://en.wikipedia.org/wiki/Circular_buffer>
+//! <https://stackoverflow.com/questions/49072494/how-does-the-vecdeque-ring-buffer-work-internally>
+//! <https://doc.rust-lang.org/nomicon/vec/vec-push-pop.html>
 //!
 #![allow(dead_code)]
-use std::{alloc::Layout, ops::Index, ptr::NonNull};
+use std::{alloc::Layout, ops::Index, ptr::NonNull, slice::from_raw_parts_mut};
 
-/// A ring buffer.
+/// A growable ring buffer.
 /// Contains a pointer to the buffer, the allocated capacity, the current length of the buffer and
 /// the head index.
 #[derive(Debug)]
@@ -26,6 +24,28 @@ impl<T> RingBuffer<T> {
         RingBuffer {
             ptr: NonNull::dangling(),
             capacity: 0,
+            head: 0,
+            len: 0,
+        }
+    }
+
+    pub fn with_capacity(capacity: usize) -> Self {
+        assert!(std::mem::size_of::<T>() != 0, "ZSTs are not supported.");
+        if capacity == 0 {
+            return Self::new();
+        }
+
+        let layout = Layout::array::<T>(capacity).unwrap();
+        let ptr = unsafe { std::alloc::alloc(layout) };
+
+        let ptr = match NonNull::new(ptr as *mut T) {
+            Some(ptr) => ptr,
+            None => std::alloc::handle_alloc_error(layout),
+        };
+
+        RingBuffer {
+            ptr,
+            capacity,
             head: 0,
             len: 0,
         }
@@ -58,7 +78,7 @@ impl<T> RingBuffer<T> {
             self.grow();
         }
 
-        let index = self.head.wrapping_sub(1) % self.capacity;
+        let index = (self.head + self.capacity - 1) % self.capacity;
 
         unsafe {
             self.ptr.as_ptr().add(index).write(item);
@@ -80,6 +100,81 @@ impl<T> RingBuffer<T> {
             self.ptr.as_ptr().add(index).write(item);
         }
         self.len += 1;
+    }
+
+    pub fn is_contiguous(&self) -> bool {
+        self.head + self.len <= self.capacity
+    }
+
+    /// Restructure the buffer so it is contiguous in memory.
+    ///
+    /// Returns a mutable reference to the buffer as a slice.
+    pub fn make_contiguous(&mut self) -> &mut [T] {
+        if self.is_contiguous() {
+            return unsafe { from_raw_parts_mut(self.ptr.as_ptr().add(self.head), self.len) };
+        }
+        //                       H
+        // [o, o, ...., ., ., ., o, o, o]
+        let top = self.capacity - self.head;
+        let bottom = self.head + self.len - self.capacity;
+        let spare = self.capacity - self.len;
+
+        if bottom <= spare {
+            // Can copy the bottom part up into the spare space.
+            // [., ., ..., o, o, o, o, o, ., ., ....]
+            unsafe {
+                self.ptr
+                    .as_ptr()
+                    .add(self.head)
+                    .copy_to(self.ptr.as_ptr().add(bottom), top);
+                self.ptr
+                    .as_ptr()
+                    .copy_to(self.ptr.as_ptr().add(bottom + top), bottom);
+            }
+            self.head = bottom;
+            return unsafe { from_raw_parts_mut(self.ptr.as_ptr().add(self.head), self.len) };
+        } else if top <= spare {
+            // Can copy the top part down into the spare space.
+            // [o, o, o, o, o, ., ., ..., ., ., .]
+            unsafe {
+                self.ptr
+                    .as_ptr()
+                    .copy_to(self.ptr.as_ptr().add(self.head - bottom), bottom);
+
+                self.ptr
+                    .as_ptr()
+                    .add(self.head)
+                    .copy_to(self.ptr.as_ptr().add(self.head - self.len), top);
+            }
+            self.head -= self.len;
+            return unsafe { from_raw_parts_mut(self.ptr.as_ptr().add(self.head), self.len) };
+        }
+
+        // Copy the slices next to eachother and then swap them.
+        if top < bottom {
+            unsafe {
+                self.ptr
+                    .as_ptr()
+                    .add(self.head)
+                    .copy_to(self.ptr.as_ptr().add(bottom), top);
+            }
+            self.head = 0;
+        } else {
+            unsafe {
+                self.ptr.as_ptr().copy_to(
+                    self.ptr.as_ptr().add(self.capacity - top - bottom),
+                    self.capacity - self.len,
+                );
+            }
+            self.head = self.capacity - self.len;
+        }
+        let slice = unsafe { from_raw_parts_mut(self.ptr.as_ptr().add(self.head), self.len) };
+        slice.rotate_left(bottom);
+        slice
+    }
+
+    pub fn iter(&self) -> Iter<T> {
+        Iter { rb: self, index: 0 }
     }
 
     /*
@@ -184,6 +279,25 @@ impl<T> Index<usize> for RingBuffer<T> {
     }
 }
 
+pub struct Iter<'a, T> {
+    rb: &'a RingBuffer<T>,
+    index: usize,
+}
+
+impl<'a, T> Iterator for Iter<'a, T> {
+    type Item = &'a T;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.index < self.rb.len {
+            let item = self.rb.get(self.index);
+            self.index += 1;
+            item
+        } else {
+            None
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
 
@@ -193,6 +307,14 @@ mod tests {
     fn test_new() {
         let rb = RingBuffer::<i32>::new();
         assert_eq!(rb.capacity, 0);
+        assert_eq!(rb.head, 0);
+        assert_eq!(rb.len, 0);
+    }
+
+    #[test]
+    fn test_with_capactiy() {
+        let rb = RingBuffer::<i32>::with_capacity(11);
+        assert!(rb.capacity >= 11);
         assert_eq!(rb.head, 0);
         assert_eq!(rb.len, 0);
     }
@@ -258,5 +380,97 @@ mod tests {
         assert_eq!(rb[0], 3);
         assert_eq!(rb[1], 2);
         assert_eq!(rb[2], 1);
+    }
+
+    #[test]
+    fn test_push() {
+        let mut rb = RingBuffer::<i32>::with_capacity(10);
+
+        //  H
+        // [0, 1, 2, 3, 4, ., ., ., ., .]
+        for i in 0..5 {
+            rb.push_back(i);
+        }
+
+        //                          H
+        // [0, 1, 2, 3, 4, ., ., ., 7, 6]
+        rb.push_front(6);
+        rb.push_front(7);
+        assert_eq!(rb.len, 7);
+        assert_eq!(rb.head, 8); // 10 - 2 = 8
+        assert_eq!(rb[0], 7);
+        assert_eq!(rb[6], 4);
+    }
+
+    #[test]
+    fn test_make_contiguous() {
+        let mut rb = RingBuffer::<i32>::with_capacity(10);
+
+        // [3, 4, 5, ., ., ., ., ., 2, 1]
+        rb.push_back(3);
+        rb.push_back(4);
+        rb.push_back(5);
+        rb.push_front(2);
+        rb.push_front(1);
+
+        let slice = rb.make_contiguous();
+        assert_eq!(slice.len(), 5);
+        assert_eq!(slice, [1, 2, 3, 4, 5]);
+
+        let mut rb = RingBuffer::<i32>::with_capacity(7);
+
+        // [2, 3, 4, 5, ., ., 1]
+        rb.push_back(2);
+        rb.push_back(3);
+        rb.push_back(4);
+        rb.push_back(5);
+        rb.push_front(1);
+
+        let slice = rb.make_contiguous();
+        assert_eq!(slice.len(), 5);
+        assert_eq!(slice, [1, 2, 3, 4, 5]);
+
+        let mut rb = RingBuffer::<i32>::with_capacity(7);
+
+        // [3, 4, 5, 6, ., 1, 2]
+        rb.push_back(3);
+        rb.push_back(4);
+        rb.push_back(5);
+        rb.push_back(6);
+        rb.push_front(2);
+        rb.push_front(1);
+
+        let slice = rb.make_contiguous();
+        assert_eq!(slice.len(), 6);
+        assert_eq!(slice, [1, 2, 3, 4, 5, 6]);
+
+        let mut rb = RingBuffer::<i32>::with_capacity(6);
+
+        // [5, 6, ., 1, 2, 3, 4]
+        rb.push_back(5);
+        rb.push_back(6);
+        rb.push_front(4);
+        rb.push_front(3);
+        rb.push_front(2);
+        rb.push_front(1);
+
+        let slice = rb.make_contiguous();
+        assert_eq!(slice.len(), 6);
+        assert_eq!(slice, [1, 2, 3, 4, 5, 6]);
+    }
+
+    fn test_iter() {
+        let mut rb = RingBuffer::<i32>::with_capacity(6);
+
+        // [5, 6, ., 1, 2, 3, 4]
+        rb.push_back(5);
+        rb.push_back(6);
+        rb.push_front(4);
+        rb.push_front(3);
+        rb.push_front(2);
+        rb.push_front(1);
+
+        let values: Vec<i32> = rb.iter().copied().collect();
+        assert_eq!(values, [1, 2, 3, 4, 5, 6]);
     }
 }
