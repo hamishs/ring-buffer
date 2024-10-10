@@ -5,7 +5,15 @@
 //! <https://doc.rust-lang.org/nomicon/vec/vec-push-pop.html>
 //!
 #![allow(dead_code)]
-use std::{alloc::Layout, ops::Index, ptr::NonNull, slice::from_raw_parts_mut};
+use std::{
+    alloc::Layout,
+    ops::Index,
+    ptr::NonNull,
+    slice::{from_raw_parts, from_raw_parts_mut},
+};
+
+mod iterator;
+use iterator::Iter;
 
 /// A growable ring buffer.
 /// Contains a pointer to the buffer, the allocated capacity, the current length of the buffer and
@@ -100,6 +108,34 @@ impl<T> RingBuffer<T> {
             self.ptr.as_ptr().add(index).write(item);
         }
         self.len += 1;
+    }
+
+    pub fn as_slices(&self) -> (&[T], &[T]) {
+        if self.is_contiguous() {
+            let slice = unsafe { from_raw_parts(self.ptr.as_ptr().add(self.head), self.len) };
+            return (slice, &[]);
+        }
+
+        let top = self.capacity - self.head;
+        let bottom = self.len - top;
+
+        let first = unsafe { from_raw_parts(self.ptr.as_ptr().add(self.head), top) };
+        let second = unsafe { from_raw_parts(self.ptr.as_ptr(), bottom) };
+        (first, second)
+    }
+
+    pub fn as_mut_slices(&self) -> (&mut [T], &mut [T]) {
+        if self.is_contiguous() {
+            let slice = unsafe { from_raw_parts_mut(self.ptr.as_ptr().add(self.head), self.len) };
+            return (slice, &mut []);
+        }
+
+        let top = self.capacity - self.head;
+        let bottom = self.len - top;
+
+        let first = unsafe { from_raw_parts_mut(self.ptr.as_ptr().add(self.head), top) };
+        let second = unsafe { from_raw_parts_mut(self.ptr.as_ptr(), bottom) };
+        (first, second)
     }
 
     pub fn is_contiguous(&self) -> bool {
@@ -279,25 +315,6 @@ impl<T> Index<usize> for RingBuffer<T> {
     }
 }
 
-pub struct Iter<'a, T> {
-    rb: &'a RingBuffer<T>,
-    index: usize,
-}
-
-impl<'a, T> Iterator for Iter<'a, T> {
-    type Item = &'a T;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        if self.index < self.rb.len {
-            let item = self.rb.get(self.index);
-            self.index += 1;
-            item
-        } else {
-            None
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
 
@@ -459,18 +476,22 @@ mod tests {
         assert_eq!(slice, [1, 2, 3, 4, 5, 6]);
     }
 
-    fn test_iter() {
-        let mut rb = RingBuffer::<i32>::with_capacity(6);
+    #[test]
+    fn test_as_slices() {
+        let mut rb = RingBuffer::<i32>::with_capacity(5);
 
-        // [5, 6, ., 1, 2, 3, 4]
-        rb.push_back(5);
-        rb.push_back(6);
-        rb.push_front(4);
-        rb.push_front(3);
+        // [3, ., ., 1, 2]
+        rb.push_back(3);
         rb.push_front(2);
         rb.push_front(1);
 
-        let values: Vec<i32> = rb.iter().copied().collect();
-        assert_eq!(values, [1, 2, 3, 4, 5, 6]);
+        let (first, second) = rb.as_slices();
+        assert_eq!(first, &[1, 2]);
+        assert_eq!(second, &[3]);
+
+        rb.make_contiguous();
+        let (first, second) = rb.as_slices();
+        assert_eq!(first, &[1, 2, 3]);
+        assert!(second.is_empty());
     }
 }
