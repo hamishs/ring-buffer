@@ -7,12 +7,12 @@
 #![allow(dead_code)]
 use std::{
     alloc::Layout,
-    ops::Index,
     ptr::NonNull,
     slice::{from_raw_parts, from_raw_parts_mut},
 };
 
 mod iterator;
+mod traits;
 use iterator::Iter;
 
 /// A growable ring buffer.
@@ -80,6 +80,10 @@ impl<T> RingBuffer<T> {
         unsafe { Some(&*self.ptr.as_ptr().add(idx)) }
     }
 
+    /**
+     * Inserting elements.
+     */
+
     /// Insert an item at the front of the buffer.
     pub fn push_front(&mut self, item: T) {
         if self.is_full() {
@@ -110,6 +114,50 @@ impl<T> RingBuffer<T> {
         self.len += 1;
     }
 
+    /**
+     * Removing elements.
+     */
+
+    /// Remove the element from the front if there is one and return it.
+    pub fn pop_front(&mut self) -> Option<T> {
+        if self.is_empty() {
+            return None;
+        }
+
+        let item = unsafe { self.ptr.as_ptr().add(self.head).read() };
+        self.head = (self.head + 1) % self.capacity;
+        self.len -= 1;
+
+        Some(item)
+    }
+
+    /// Remove the element from the back if there is one and return it.
+    pub fn pop_back(&mut self) -> Option<T> {
+        if self.is_empty() {
+            return None;
+        }
+
+        let idx = (self.head + self.len - 1) % self.capacity;
+        let item = unsafe { self.ptr.as_ptr().add(idx).read() };
+        self.len -= 1;
+
+        Some(item)
+    }
+
+    /**
+     * Memory layout.
+     */
+
+    /// Return true if the buffer is contiguous in memory.
+    pub fn is_contiguous(&self) -> bool {
+        self.head + self.len <= self.capacity
+    }
+
+    /// Return the buffer a pair of slices.
+    ///
+    /// Two are required because the buffer may wrap around the end of the allocated memory.
+    /// The front of the buffer is always the first slice and the back is always the second.
+    /// If the buffer is contiguous then the second slice will be empty.
     pub fn as_slices(&self) -> (&[T], &[T]) {
         if self.is_contiguous() {
             let slice = unsafe { from_raw_parts(self.ptr.as_ptr().add(self.head), self.len) };
@@ -124,6 +172,7 @@ impl<T> RingBuffer<T> {
         (first, second)
     }
 
+    /// Return the buffer as a pair of mutable slices.
     pub fn as_mut_slices(&self) -> (&mut [T], &mut [T]) {
         if self.is_contiguous() {
             let slice = unsafe { from_raw_parts_mut(self.ptr.as_ptr().add(self.head), self.len) };
@@ -136,10 +185,6 @@ impl<T> RingBuffer<T> {
         let first = unsafe { from_raw_parts_mut(self.ptr.as_ptr().add(self.head), top) };
         let second = unsafe { from_raw_parts_mut(self.ptr.as_ptr(), bottom) };
         (first, second)
-    }
-
-    pub fn is_contiguous(&self) -> bool {
-        self.head + self.len <= self.capacity
     }
 
     /// Restructure the buffer so it is contiguous in memory.
@@ -208,6 +253,10 @@ impl<T> RingBuffer<T> {
         slice.rotate_left(bottom);
         slice
     }
+
+    /*
+     * Iteration.
+     */
 
     pub fn iter(&self) -> Iter<T> {
         Iter { rb: self, index: 0 }
@@ -292,26 +341,17 @@ impl<T> RingBuffer<T> {
     }
 }
 
-/// Safety: `NonNull` provides `Send` if `T` is `Send`.
-unsafe impl<T: Send> Send for RingBuffer<T> {}
-
-/// Safety: `NonNull` provides `Sync` if `T` is `Sync`.
-unsafe impl<T: Sync> Sync for RingBuffer<T> {}
-
-impl<T> Default for RingBuffer<T> {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-/// Allow raw indexing into the buffer.
-///
-/// Warning: this will panic if the index is out of bounds.
-impl<T> Index<usize> for RingBuffer<T> {
-    type Output = T;
-
-    fn index(&self, index: usize) -> &Self::Output {
-        self.get(index).expect("Index out of bounds.")
+impl<T> Drop for RingBuffer<T> {
+    fn drop(&mut self) {
+        if self.capacity != 0 {
+            // Drop all elements in the buffer.
+            while self.pop_front().is_some() {}
+            // Deallocate the buffer.
+            let layout = Layout::array::<T>(self.capacity).unwrap();
+            unsafe {
+                std::alloc::dealloc(self.ptr.as_ptr() as *mut u8, layout);
+            }
+        }
     }
 }
 
@@ -319,6 +359,24 @@ impl<T> Index<usize> for RingBuffer<T> {
 mod tests {
 
     use super::*;
+
+    macro_rules! buffer_from_layout {
+        ($len:tt: [$( $n:tt ),* ... $( $m:tt ),*]) => {{
+            let mut rb = RingBuffer::<i32>::with_capacity($len);
+
+            $(
+                rb.push_back($n);
+            )*
+
+            let mut front = vec![$($m),*];
+            front.reverse();
+            for i in front {
+                rb.push_front(i);
+            }
+
+            rb
+        }};
+    }
 
     #[test]
     fn test_new() {
@@ -417,6 +475,36 @@ mod tests {
         assert_eq!(rb.head, 8); // 10 - 2 = 8
         assert_eq!(rb[0], 7);
         assert_eq!(rb[6], 4);
+    }
+
+    #[test]
+    fn test_pop_front() {
+        let mut rb = RingBuffer::<i32>::with_capacity(10);
+
+        // [3, ., ., 1, 2]
+        rb.push_back(3);
+        rb.push_front(2);
+        rb.push_front(1);
+
+        assert_eq!(rb.pop_front(), Some(1));
+        assert_eq!(rb.pop_front(), Some(2));
+        assert_eq!(rb.pop_front(), Some(3));
+        assert_eq!(rb.pop_front(), None);
+    }
+
+    #[test]
+    fn test_pop_back() {
+        let mut rb = RingBuffer::<i32>::with_capacity(10);
+
+        // [3, ., ., 1, 2]
+        rb.push_back(3);
+        rb.push_front(2);
+        rb.push_front(1);
+
+        assert_eq!(rb.pop_back(), Some(3));
+        assert_eq!(rb.pop_back(), Some(2));
+        assert_eq!(rb.pop_back(), Some(1));
+        assert_eq!(rb.pop_back(), None);
     }
 
     #[test]
