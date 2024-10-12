@@ -1,9 +1,4 @@
 //! A growable ring buffer implementation.
-//!
-//! <https://en.wikipedia.org/wiki/Circular_buffer>
-//! <https://stackoverflow.com/questions/49072494/how-does-the-vecdeque-ring-buffer-work-internally>
-//! <https://doc.rust-lang.org/nomicon/vec/vec-push-pop.html>
-//!
 #![allow(dead_code)]
 use std::{
     alloc::Layout,
@@ -242,10 +237,9 @@ impl<T> RingBuffer<T> {
             self.head = 0;
         } else {
             unsafe {
-                self.ptr.as_ptr().copy_to(
-                    self.ptr.as_ptr().add(self.capacity - top - bottom),
-                    self.capacity - self.len,
-                );
+                self.ptr
+                    .as_ptr()
+                    .copy_to(self.ptr.as_ptr().add(self.capacity - self.len), bottom);
             }
             self.head = self.capacity - self.len;
         }
@@ -395,6 +389,20 @@ mod tests {
     }
 
     #[test]
+    fn test_buffer_from_layout() {
+        // [3, 4, 5, ., ., ., 1, 2]
+        let rb = buffer_from_layout!(7: [3, 4, 5 ... 1, 2]);
+        assert_eq!(rb.capacity, 7);
+        assert_eq!(rb.head, 5);
+        assert_eq!(rb.len, 5);
+        assert_eq!(rb[0], 1);
+        assert_eq!(rb[1], 2);
+        assert_eq!(rb[2], 3);
+        assert_eq!(rb[3], 4);
+        assert_eq!(rb[4], 5);
+    }
+
+    #[test]
     fn test_grow() {
         let mut rb = RingBuffer::<i32>::new();
         rb.grow();
@@ -479,12 +487,7 @@ mod tests {
 
     #[test]
     fn test_pop_front() {
-        let mut rb = RingBuffer::<i32>::with_capacity(10);
-
-        // [3, ., ., 1, 2]
-        rb.push_back(3);
-        rb.push_front(2);
-        rb.push_front(1);
+        let mut rb = buffer_from_layout!(10: [3 ... 1, 2]);
 
         assert_eq!(rb.pop_front(), Some(1));
         assert_eq!(rb.pop_front(), Some(2));
@@ -494,12 +497,7 @@ mod tests {
 
     #[test]
     fn test_pop_back() {
-        let mut rb = RingBuffer::<i32>::with_capacity(10);
-
-        // [3, ., ., 1, 2]
-        rb.push_back(3);
-        rb.push_front(2);
-        rb.push_front(1);
+        let mut rb = buffer_from_layout!(10: [3 ... 1, 2]);
 
         assert_eq!(rb.pop_back(), Some(3));
         assert_eq!(rb.pop_back(), Some(2));
@@ -509,56 +507,22 @@ mod tests {
 
     #[test]
     fn test_make_contiguous() {
-        let mut rb = RingBuffer::<i32>::with_capacity(10);
-
-        // [3, 4, 5, ., ., ., ., ., 2, 1]
-        rb.push_back(3);
-        rb.push_back(4);
-        rb.push_back(5);
-        rb.push_front(2);
-        rb.push_front(1);
-
+        let mut rb = buffer_from_layout!(10: [3, 4, 5 ... 1, 2]);
         let slice = rb.make_contiguous();
         assert_eq!(slice.len(), 5);
         assert_eq!(slice, [1, 2, 3, 4, 5]);
 
-        let mut rb = RingBuffer::<i32>::with_capacity(7);
-
-        // [2, 3, 4, 5, ., ., 1]
-        rb.push_back(2);
-        rb.push_back(3);
-        rb.push_back(4);
-        rb.push_back(5);
-        rb.push_front(1);
-
+        let mut rb = buffer_from_layout!(7: [2, 3, 4, 5 ... 1]);
         let slice = rb.make_contiguous();
         assert_eq!(slice.len(), 5);
         assert_eq!(slice, [1, 2, 3, 4, 5]);
 
-        let mut rb = RingBuffer::<i32>::with_capacity(7);
-
-        // [3, 4, 5, 6, ., 1, 2]
-        rb.push_back(3);
-        rb.push_back(4);
-        rb.push_back(5);
-        rb.push_back(6);
-        rb.push_front(2);
-        rb.push_front(1);
-
+        let mut rb = buffer_from_layout!(7: [3, 4, 5, 6 ... 1, 2]);
         let slice = rb.make_contiguous();
         assert_eq!(slice.len(), 6);
         assert_eq!(slice, [1, 2, 3, 4, 5, 6]);
 
-        let mut rb = RingBuffer::<i32>::with_capacity(6);
-
-        // [5, 6, ., 1, 2, 3, 4]
-        rb.push_back(5);
-        rb.push_back(6);
-        rb.push_front(4);
-        rb.push_front(3);
-        rb.push_front(2);
-        rb.push_front(1);
-
+        let mut rb = buffer_from_layout!(7: [5, 6 ... 1, 2, 3, 4]);
         let slice = rb.make_contiguous();
         assert_eq!(slice.len(), 6);
         assert_eq!(slice, [1, 2, 3, 4, 5, 6]);
@@ -566,12 +530,7 @@ mod tests {
 
     #[test]
     fn test_as_slices() {
-        let mut rb = RingBuffer::<i32>::with_capacity(5);
-
-        // [3, ., ., 1, 2]
-        rb.push_back(3);
-        rb.push_front(2);
-        rb.push_front(1);
+        let mut rb = buffer_from_layout!(5: [3 ... 1, 2]);
 
         let (first, second) = rb.as_slices();
         assert_eq!(first, &[1, 2]);
